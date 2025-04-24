@@ -1,0 +1,577 @@
+// Struttura del progetto React per Concierge AI
+
+// App.js - Componente principale dell'applicazione
+import React, { useState, useEffect } from 'react';
+import './App.css';
+import ConversationBox from './components/ConversationBox';
+import BookingHistory from './components/BookingHistory';
+import LoadingIndicator from './components/LoadingIndicator';
+import ApiService from './services/ApiService';
+import BookingService from './services/BookingService';
+
+function App() {
+  const [conversations, setConversations] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [bookingHistory, setBookingHistory] = useState([]);
+  const [user, setUser] = useState(null);
+
+  useEffect(() => {
+    // Controlla se l'utente è autenticato
+    const checkAuth = async () => {
+      const userData = localStorage.getItem('user');
+      if (userData) {
+        setUser(JSON.parse(userData));
+        // Carica lo storico delle prenotazioni
+        loadBookingHistory(JSON.parse(userData).id);
+      }
+    };
+    
+    checkAuth();
+  }, []);
+
+  const loadBookingHistory = async (userId) => {
+    try {
+      const history = await BookingService.getUserBookings(userId);
+      setBookingHistory(history);
+    } catch (error) {
+      console.error('Errore nel caricamento dello storico prenotazioni:', error);
+    }
+  };
+
+  const handleUserMessage = async (message) => {
+    // Aggiungi il messaggio dell'utente alla conversazione
+    const newUserMessage = { sender: 'user', text: message, timestamp: new Date() };
+    setConversations(prev => [...prev, newUserMessage]);
+    setLoading(true);
+
+    try {
+      // Comunica con l'API di GPT
+      const response = await ApiService.processUserRequest(message, user?.id);
+      
+      // Analizza la risposta per capire se contiene una prenotazione
+      const { text, bookingDetails } = response;
+      
+      // Aggiungi la risposta alla conversazione
+      const newAiMessage = { sender: 'ai', text, timestamp: new Date() };
+      setConversations(prev => [...prev, newAiMessage]);
+      
+      // Se contiene dettagli di prenotazione, li mostriamo all'utente
+      if (bookingDetails) {
+        // Aggiungi costo di commissione
+        bookingDetails.commission = 0.50;
+        
+        // Mostra la conferma di prenotazione
+        const confirmationMessage = { 
+          sender: 'system', 
+          type: 'booking', 
+          data: bookingDetails,
+          timestamp: new Date() 
+        };
+        setConversations(prev => [...prev, confirmationMessage]);
+        
+        // Aggiorna lo storico prenotazioni
+        if (bookingDetails.confirmed) {
+          setBookingHistory(prev => [...prev, bookingDetails]);
+        }
+      }
+    } catch (error) {
+      console.error('Errore nella comunicazione con l\'API:', error);
+      // Messaggio di errore
+      const errorMessage = { 
+        sender: 'system', 
+        text: 'Mi dispiace, si è verificato un errore. Riprova più tardi.', 
+        timestamp: new Date() 
+      };
+      setConversations(prev => [...prev, errorMessage]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLogin = (userData) => {
+    setUser(userData);
+    localStorage.setItem('user', JSON.stringify(userData));
+    loadBookingHistory(userData.id);
+  };
+
+  const handleLogout = () => {
+    setUser(null);
+    localStorage.removeItem('user');
+    setBookingHistory([]);
+    setConversations([]);
+  };
+
+  return (
+    <div className="app-container">
+      <header>
+        <h1>Concierge AI</h1>
+        <p>Il tuo assistente di prenotazione personale</p>
+        {user ? (
+          <div className="user-panel">
+            <p>Ciao, {user.name}</p>
+            <button onClick={handleLogout}>Logout</button>
+          </div>
+        ) : (
+          <LoginRegister onLogin={handleLogin} />
+        )}
+      </header>
+      
+      <main>
+        <ConversationBox 
+          conversations={conversations} 
+          onSendMessage={handleUserMessage} 
+          loading={loading}
+        />
+        
+        {user && (
+          <BookingHistory bookings={bookingHistory} />
+        )}
+      </main>
+      
+      <footer>
+        <p>Concierge AI - Commissione fissa di 0,50€ per prenotazione</p>
+      </footer>
+    </div>
+  );
+}
+
+export default App;
+
+// apiService.js - Gestisce le chiamate API verso GPT e i servizi di prenotazione
+const ApiService = {
+  // Elabora la richiesta dell'utente tramite GPT
+  async processUserRequest(message, userId) {
+    try {
+      const response = await fetch('/api/process', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ message, userId }),
+      });
+      
+      if (!response.ok) {
+        throw new Error('Errore nella comunicazione con il server');
+      }
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Errore nella comunicazione con l\'API:', error);
+      throw error;
+    }
+  },
+  
+  // API per la prenotazione di hotel
+  async bookHotel(bookingDetails) {
+    // Integrazione con API di prenotazione hotel
+    try {
+      const response = await fetch('/api/book/hotel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(bookingDetails),
+      });
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Errore nella prenotazione dell\'hotel:', error);
+      throw error;
+    }
+  },
+  
+  // API per la prenotazione di ristoranti
+  async bookRestaurant(bookingDetails) {
+    // Integrazione con API di prenotazione ristoranti
+    try {
+      const response = await fetch('/api/book/restaurant', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(bookingDetails),
+      });
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Errore nella prenotazione del ristorante:', error);
+      throw error;
+    }
+  },
+  
+  // API per la prenotazione di trasporti (Uber, taxi, ecc.)
+  async bookTransport(bookingDetails) {
+    // Integrazione con API di prenotazione trasporti
+    try {
+      const response = await fetch('/api/book/transport', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(bookingDetails),
+      });
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Errore nella prenotazione del trasporto:', error);
+      throw error;
+    }
+  },
+  
+  // API per la prenotazione di voli
+  async bookFlight(bookingDetails) {
+    // Integrazione con API di prenotazione voli
+    try {
+      const response = await fetch('/api/book/flight', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(bookingDetails),
+      });
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Errore nella prenotazione del volo:', error);
+      throw error;
+    }
+  }
+};
+
+export default ApiService;
+
+// Backend - server.js
+const express = require('express');
+const cors = require('cors');
+const OpenAI = require('openai');
+const mongoose = require('mongoose');
+const bodyParser = require('body-parser');
+const axios = require('axios');
+
+// Configurazione server Express
+const app = express();
+app.use(cors());
+app.use(bodyParser.json());
+
+// Connessione al database MongoDB
+mongoose.connect('mongodb://localhost:27017/concierge-ai', {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+});
+
+// Configurazione client OpenAI
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+
+// Modello per le prenotazioni
+const bookingSchema = new mongoose.Schema({
+  userId: String,
+  type: String, // hotel, restaurant, transport, flight, etc.
+  details: Object,
+  status: String,
+  date: Date,
+  commission: Number,
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Booking = mongoose.model('Booking', bookingSchema);
+
+// API per processare le richieste dell'utente
+app.post('/api/process', async (req, res) => {
+  try {
+    const { message, userId } = req.body;
+    
+    // Comunica con GPT per analizzare la richiesta dell'utente
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4",
+      messages: [
+        {
+          role: "system",
+          content: `Sei un assistente di prenotazione intelligente. Analizza la richiesta dell'utente per capire:
+          1. Tipo di prenotazione (hotel, ristorante, trasporto, volo, ecc.)
+          2. Dettagli della prenotazione (date, orari, numero persone, ecc.)
+          3. Posizione o destinazione
+          4. Preferenze specifiche
+          
+          Rispondi in formato JSON con i campi:
+          - intentType: il tipo di prenotazione richiesta
+          - details: oggetto con tutti i dettagli rilevanti
+          - missingInfo: campi mancanti che servono per completare la prenotazione
+          - responseText: risposta naturale da mostrare all'utente`
+        },
+        { role: "user", content: message }
+      ]
+    });
+    
+    // Estrae il risultato
+    const analysisResult = JSON.parse(completion.choices[0].message.content);
+    
+    // Se abbiamo tutte le informazioni necessarie, procedi con la prenotazione
+    if (analysisResult.missingInfo && analysisResult.missingInfo.length === 0) {
+      // Esegui la prenotazione in base al tipo di richiesta
+      let bookingResult;
+      
+      switch(analysisResult.intentType) {
+        case 'hotel':
+          bookingResult = await bookHotel(analysisResult.details, userId);
+          break;
+        case 'restaurant':
+          bookingResult = await bookRestaurant(analysisResult.details, userId);
+          break;
+        case 'transport':
+          bookingResult = await bookTransport(analysisResult.details, userId);
+          break;
+        case 'flight':
+          bookingResult = await bookFlight(analysisResult.details, userId);
+          break;
+        default:
+          bookingResult = { success: false, message: 'Tipo di prenotazione non supportato' };
+      }
+      
+      // Salva la prenotazione nel database
+      if (bookingResult.success) {
+        const booking = new Booking({
+          userId,
+          type: analysisResult.intentType,
+          details: analysisResult.details,
+          status: 'confirmed',
+          commission: 0.50
+        });
+        
+        await booking.save();
+        
+        res.json({
+          text: analysisResult.responseText,
+          bookingDetails: {
+            type: analysisResult.intentType,
+            details: analysisResult.details,
+            confirmed: true,
+            confirmationCode: bookingResult.confirmationCode
+          }
+        });
+      } else {
+        res.json({
+          text: `${analysisResult.responseText}\n\nPurtroppo non è stato possibile completare la prenotazione: ${bookingResult.message}`,
+          bookingDetails: null
+        });
+      }
+    } else {
+      // Chiedi informazioni mancanti
+      res.json({
+        text: `${analysisResult.responseText}\n\nPer procedere con la prenotazione, ho bisogno di alcune informazioni aggiuntive: ${analysisResult.missingInfo.join(', ')}.`,
+        bookingDetails: null
+      });
+    }
+  } catch (error) {
+    console.error('Errore nell\'elaborazione della richiesta:', error);
+    res.status(500).json({ error: 'Errore nell\'elaborazione della richiesta' });
+  }
+});
+
+// Implementazione funzioni di prenotazione
+
+// Prenotazione hotel
+async function bookHotel(details, userId) {
+  try {
+    // Qui inseriresti l'integrazione con API reali di prenotazione hotel
+    // Per questo esempio, simulo una prenotazione riuscita
+    return {
+      success: true,
+      confirmationCode: 'H' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+      message: 'Prenotazione hotel confermata'
+    };
+  } catch (error) {
+    console.error('Errore nella prenotazione hotel:', error);
+    return { success: false, message: 'Errore nella prenotazione hotel' };
+  }
+}
+
+// Prenotazione ristorante
+async function bookRestaurant(details, userId) {
+  try {
+    // Qui inseriresti l'integrazione con API reali di prenotazione ristoranti
+    return {
+      success: true,
+      confirmationCode: 'R' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+      message: 'Prenotazione ristorante confermata'
+    };
+  } catch (error) {
+    console.error('Errore nella prenotazione ristorante:', error);
+    return { success: false, message: 'Errore nella prenotazione ristorante' };
+  }
+}
+
+// Prenotazione trasporto
+async function bookTransport(details, userId) {
+  try {
+    // Qui inseriresti l'integrazione con API come Uber, Lyft, ecc.
+    return {
+      success: true,
+      confirmationCode: 'T' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+      message: 'Prenotazione trasporto confermata'
+    };
+  } catch (error) {
+    console.error('Errore nella prenotazione trasporto:', error);
+    return { success: false, message: 'Errore nella prenotazione trasporto' };
+  }
+}
+
+// Prenotazione volo
+async function bookFlight(details, userId) {
+  try {
+    // Qui inseriresti l'integrazione con API di prenotazione voli
+    return {
+      success: true,
+      confirmationCode: 'F' + Math.random().toString(36).substring(2, 8).toUpperCase(),
+      message: 'Prenotazione volo confermata'
+    };
+  } catch (error) {
+    console.error('Errore nella prenotazione volo:', error);
+    return { success: false, message: 'Errore nella prenotazione volo' };
+  }
+}
+
+// API per ottenere lo storico delle prenotazioni di un utente
+app.get('/api/bookings/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const bookings = await Booking.find({ userId }).sort({ createdAt: -1 });
+    res.json(bookings);
+  } catch (error) {
+    console.error('Errore nel recupero delle prenotazioni:', error);
+    res.status(500).json({ error: 'Errore nel recupero delle prenotazioni' });
+  }
+});
+
+// Avvio del server
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server in ascolto sulla porta ${PORT}`);
+});
+
+// Componente React per la visualizzazione della chat
+// ConversationBox.js
+import React, { useState, useRef, useEffect } from 'react';
+import './ConversationBox.css';
+
+function ConversationBox({ conversations, onSendMessage, loading }) {
+  const [message, setMessage] = useState('');
+  const messagesEndRef = useRef(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [conversations]);
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    if (message.trim() && !loading) {
+      onSendMessage(message);
+      setMessage('');
+    }
+  };
+
+  const formatTime = (timestamp) => {
+    const date = new Date(timestamp);
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const renderMessage = (msg, index) => {
+    if (msg.sender === 'user') {
+      return (
+        <div key={index} className="message user-message">
+          <div className="message-content">
+            <p>{msg.text}</p>
+          </div>
+          <div className="message-timestamp">{formatTime(msg.timestamp)}</div>
+        </div>
+      );
+    } else if (msg.sender === 'ai') {
+      return (
+        <div key={index} className="message ai-message">
+          <div className="message-content">
+            <p>{msg.text}</p>
+          </div>
+          <div className="message-timestamp">{formatTime(msg.timestamp)}</div>
+        </div>
+      );
+    } else if (msg.sender === 'system' && msg.type === 'booking') {
+      // Rendering di una conferma di prenotazione
+      return (
+        <div key={index} className="message system-message booking-confirmation">
+          <div className="booking-details">
+            <h3>Prenotazione Confermata</h3>
+            <p>Tipo: {msg.data.type.charAt(0).toUpperCase() + msg.data.type.slice(1)}</p>
+            {Object.entries(msg.data.details).map(([key, value]) => (
+              <p key={key}>{key}: {typeof value === 'object' ? JSON.stringify(value) : value}</p>
+            ))}
+            <p className="confirmation-code">Codice di conferma: {msg.data.confirmationCode}</p>
+            <p className="commission">Commissione: €0,50</p>
+          </div>
+          <div className="message-timestamp">{formatTime(msg.timestamp)}</div>
+        </div>
+      );
+    } else {
+      return (
+        <div key={index} className="message system-message">
+          <div className="message-content">
+            <p>{msg.text}</p>
+          </div>
+          <div className="message-timestamp">{formatTime(msg.timestamp)}</div>
+        </div>
+      );
+    }
+  };
+
+  return (
+    <div className="conversation-container">
+      <div className="messages-container">
+        {conversations.length === 0 ? (
+          <div className="welcome-message">
+            <h2>Benvenuto/a in Concierge AI!</h2>
+            <p>Chiedi qualsiasi cosa riguardo prenotazioni di:</p>
+            <ul>
+              <li>Hotel e alloggi</li>
+              <li>Ristoranti</li>
+              <li>Voli e viaggi</li>
+              <li>Trasporti (Uber, taxi)</li>
+              <li>Esperienze e attività</li>
+            </ul>
+            <p>Commissione fissa di soli €0,50 per prenotazione completata.</p>
+          </div>
+        ) : (
+          conversations.map((msg, index) => renderMessage(msg, index))
+        )}
+        {loading && (
+          <div className="message ai-message loading">
+            <div className="typing-indicator">
+              <span></span>
+              <span></span>
+              <span></span>
+            </div>
+          </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
+      
+      <form className="input-container" onSubmit={handleSubmit}>
+        <input
+          type="text"
+          value={message}
+          onChange={(e) => setMessage(e.target.value)}
+          placeholder="Descrivi cosa vuoi prenotare..."
+          disabled={loading}
+        />
+        <button type="submit" disabled={!message.trim() || loading}>
+          Invia
+        </button>
+      </form>
+    </div>
+  );
+}
+
+export default ConversationBox;
