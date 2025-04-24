@@ -1,20 +1,30 @@
-// Struttura del progetto React per Concierge AI
-
-// App.js - Componente principale dell'applicazione
+// App.js - Componente principale con funzionalità di pagamento e ricerca integrata
 import React, { useState, useEffect } from 'react';
 import './App.css';
 import ConversationBox from './components/ConversationBox';
 import BookingHistory from './components/BookingHistory';
 import LoadingIndicator from './components/LoadingIndicator';
+import SearchBox from './components/SearchBox';
+import PaymentModal from './components/PaymentModal';
 import ApiService from './services/ApiService';
 import BookingService from './services/BookingService';
+import PaymentService from './services/PaymentService';
+import { Elements } from '@stripe/react-stripe-js';
+import { loadStripe } from '@stripe/stripe-js';
+
+// Caricamento dell'istanza Stripe (mettere la chiave pubblica nella variabile d'ambiente)
+const stripePromise = loadStripe(process.env.REACT_APP_STRIPE_PUBLIC_KEY);
 
 function App() {
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(false);
   const [bookingHistory, setBookingHistory] = useState([]);
   const [user, setUser] = useState(null);
-
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [activeBooking, setActiveBooking] = useState(null);
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  
   useEffect(() => {
     // Controlla se l'utente è autenticato
     const checkAuth = async () => {
@@ -38,6 +48,45 @@ function App() {
     }
   };
 
+  const handleSearch = async (query, type) => {
+    setIsSearching(true);
+    try {
+      const results = await ApiService.searchOptions(query, type);
+      setSearchResults(results);
+    } catch (error) {
+      console.error('Errore nella ricerca:', error);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  const handleSearchOptionSelect = (option) => {
+    // Aggiungi l'opzione selezionata alla conversazione
+    const selectionMessage = { 
+      sender: 'user', 
+      text: `Ho scelto: ${option.name || option.title}`, 
+      timestamp: new Date() 
+    };
+    setConversations(prev => [...prev, selectionMessage]);
+    
+    // Rispondi con dettagli sull'opzione selezionata
+    const responseMessage = { 
+      sender: 'ai', 
+      text: `Ottima scelta! Hai selezionato ${option.name || option.title}. Desideri procedere con la prenotazione?`, 
+      timestamp: new Date() 
+    };
+    setConversations(prev => [...prev, responseMessage]);
+    
+    // Memorizza l'opzione per la prenotazione
+    setActiveBooking({
+      type: option.type,
+      details: option
+    });
+    
+    // Nascondi i risultati della ricerca
+    setSearchResults([]);
+  };
+
   const handleUserMessage = async (message) => {
     // Aggiungi il messaggio dell'utente alla conversazione
     const newUserMessage = { sender: 'user', text: message, timestamp: new Date() };
@@ -45,33 +94,68 @@ function App() {
     setLoading(true);
 
     try {
-      // Comunica con l'API di GPT
+      // Se il messaggio contiene termini di ricerca, esegui una ricerca
+      if (message.toLowerCase().includes('cerca') || message.toLowerCase().includes('trova')) {
+        const searchTerms = extractSearchTerms(message);
+        if (searchTerms) {
+          // Esegui la ricerca
+          const results = await ApiService.searchOptions(searchTerms.query, searchTerms.type);
+          setSearchResults(results);
+          
+          // Aggiungi risposta dell'AI
+          const searchResponseMessage = { 
+            sender: 'ai', 
+            text: `Ecco i risultati per la tua ricerca di ${searchTerms.type}:`, 
+            timestamp: new Date() 
+          };
+          setConversations(prev => [...prev, searchResponseMessage]);
+          setLoading(false);
+          return;
+        }
+      }
+      
+      // Se abbiamo una prenotazione attiva e il messaggio indica conferma
+      if (activeBooking && (message.toLowerCase().includes('conferma') || message.toLowerCase().includes('procedi'))) {
+        const confirmationMessage = { 
+          sender: 'ai', 
+          text: `Procediamo con la prenotazione di ${activeBooking.type}. Ti porterò alla pagina di pagamento.`, 
+          timestamp: new Date() 
+        };
+        setConversations(prev => [...prev, confirmationMessage]);
+        
+        // Mostra il modale di pagamento
+        setShowPaymentModal(true);
+        setLoading(false);
+        return;
+      }
+      
+      // Comunica con l'API di GPT per analizzare la richiesta
       const response = await ApiService.processUserRequest(message, user?.id);
       
-      // Analizza la risposta per capire se contiene una prenotazione
-      const { text, bookingDetails } = response;
+      // Analizza la risposta
+      const { text, bookingDetails, searchSuggestion } = response;
       
       // Aggiungi la risposta alla conversazione
       const newAiMessage = { sender: 'ai', text, timestamp: new Date() };
       setConversations(prev => [...prev, newAiMessage]);
       
-      // Se contiene dettagli di prenotazione, li mostriamo all'utente
+      // Se contiene suggerimento di ricerca, esegui la ricerca
+      if (searchSuggestion) {
+        const results = await ApiService.searchOptions(searchSuggestion.query, searchSuggestion.type);
+        setSearchResults(results);
+      }
+      
+      // Se contiene dettagli di prenotazione
       if (bookingDetails) {
-        // Aggiungi costo di commissione
-        bookingDetails.commission = 0.50;
+        setActiveBooking({
+          type: bookingDetails.type,
+          details: bookingDetails.details
+        });
         
-        // Mostra la conferma di prenotazione
-        const confirmationMessage = { 
-          sender: 'system', 
-          type: 'booking', 
-          data: bookingDetails,
-          timestamp: new Date() 
-        };
-        setConversations(prev => [...prev, confirmationMessage]);
-        
-        // Aggiorna lo storico prenotazioni
-        if (bookingDetails.confirmed) {
-          setBookingHistory(prev => [...prev, bookingDetails]);
+        // Se la prenotazione richiede il pagamento immediato
+        if (bookingDetails.requiresPayment) {
+          // Mostra il modale di pagamento
+          setShowPaymentModal(true);
         }
       }
     } catch (error) {
@@ -99,6 +183,72 @@ function App() {
     localStorage.removeItem('user');
     setBookingHistory([]);
     setConversations([]);
+    setActiveBooking(null);
+  };
+
+  const handlePaymentComplete = async (paymentResult) => {
+    setShowPaymentModal(false);
+    
+    if (paymentResult.success) {
+      try {
+        // Finalizza la prenotazione con il pagamento
+        const bookingResult = await BookingService.finalizeBooking(activeBooking, user.id, paymentResult.paymentId);
+        
+        // Aggiorna lo storico prenotazioni
+        loadBookingHistory(user.id);
+        
+        // Messaggio di conferma
+        const confirmationMessage = { 
+          sender: 'system', 
+          type: 'booking', 
+          data: {
+            ...activeBooking,
+            confirmed: true,
+            confirmationCode: bookingResult.confirmationCode,
+            totalPrice: bookingResult.totalPrice,
+            commission: 0.50
+          },
+          timestamp: new Date() 
+        };
+        setConversations(prev => [...prev, confirmationMessage]);
+        
+        // Reset della prenotazione attiva
+        setActiveBooking(null);
+      } catch (error) {
+        console.error('Errore nella finalizzazione della prenotazione:', error);
+        const errorMessage = { 
+          sender: 'system', 
+          text: 'Mi dispiace, si è verificato un errore durante la conferma della prenotazione. Il pagamento è stato elaborato ma contattaci per la conferma.', 
+          timestamp: new Date() 
+        };
+        setConversations(prev => [...prev, errorMessage]);
+      }
+    } else {
+      // Messaggio di errore pagamento
+      const errorMessage = { 
+        sender: 'system', 
+        text: `Mi dispiace, il pagamento non è andato a buon fine: ${paymentResult.message}`, 
+        timestamp: new Date() 
+      };
+      setConversations(prev => [...prev, errorMessage]);
+    }
+  };
+
+  const extractSearchTerms = (message) => {
+    // Estrai i termini di ricerca dal messaggio
+    const hotelMatch = message.match(/cerca\s+hotel\s+(?:a|in|per)\s+([^\s,\.]+)/i);
+    const restaurantMatch = message.match(/cerca\s+ristorante\s+(?:a|in|per)\s+([^\s,\.]+)/i);
+    const flightMatch = message.match(/cerca\s+voli\s+(?:a|per|verso)\s+([^\s,\.]+)/i);
+    
+    if (hotelMatch) {
+      return { type: 'hotel', query: hotelMatch[1] };
+    } else if (restaurantMatch) {
+      return { type: 'restaurant', query: restaurantMatch[1] };
+    } else if (flightMatch) {
+      return { type: 'flight', query: flightMatch[1] };
+    }
+    
+    return null;
   };
 
   return (
@@ -123,10 +273,29 @@ function App() {
           loading={loading}
         />
         
+        {searchResults.length > 0 && (
+          <SearchBox 
+            results={searchResults} 
+            isLoading={isSearching}
+            onSelectOption={handleSearchOptionSelect}
+          />
+        )}
+        
         {user && (
           <BookingHistory bookings={bookingHistory} />
         )}
       </main>
+      
+      {showPaymentModal && (
+        <Elements stripe={stripePromise}>
+          <PaymentModal 
+            booking={activeBooking}
+            onClose={() => setShowPaymentModal(false)}
+            onComplete={handlePaymentComplete}
+            commission={0.50}
+          />
+        </Elements>
+      )}
       
       <footer>
         <p>Concierge AI - Commissione fissa di 0,50€ per prenotazione</p>
@@ -137,7 +306,265 @@ function App() {
 
 export default App;
 
-// apiService.js - Gestisce le chiamate API verso GPT e i servizi di prenotazione
+// SearchBox.js - Componente per mostrare i risultati della ricerca dinamica
+import React from 'react';
+import './SearchBox.css';
+
+function SearchBox({ results, isLoading, onSelectOption }) {
+  if (isLoading) {
+    return (
+      <div className="search-results-container">
+        <div className="search-loading">
+          <div className="spinner"></div>
+          <p>Ricerca in corso...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="search-results-container">
+      <h3>Risultati della ricerca</h3>
+      <div className="search-results-list">
+        {results.map((result, index) => (
+          <div 
+            key={index} 
+            className="search-result-item"
+            onClick={() => onSelectOption(result)}
+          >
+            <div className="result-image">
+              {result.imageUrl ? (
+                <img src={result.imageUrl} alt={result.name || result.title} />
+              ) : (
+                <div className="placeholder-image"></div>
+              )}
+            </div>
+            <div className="result-details">
+              <h4>{result.name || result.title}</h4>
+              <p className="result-location">{result.location}</p>
+              <p className="result-description">{result.description}</p>
+              <div className="result-price">
+                {result.price && (
+                  <span className="price">{result.price}€</span>
+                )}
+                {result.rating && (
+                  <span className="rating">
+                    {Array(Math.round(result.rating)).fill('★').join('')}
+                    {Array(5 - Math.round(result.rating)).fill('☆').join('')}
+                  </span>
+                )}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+export default SearchBox;
+
+// PaymentModal.js - Componente per gestire i pagamenti tramite Stripe
+import React, { useState } from 'react';
+import { CardElement, useStripe, useElements } from '@stripe/react-stripe-js';
+import './PaymentModal.css';
+import PaymentService from '../services/PaymentService';
+
+function PaymentModal({ booking, onClose, onComplete, commission }) {
+  const stripe = useStripe();
+  const elements = useElements();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  
+  // Calcola il prezzo totale
+  const calculateTotal = () => {
+    const basePrice = booking.details.price || 0;
+    return (parseFloat(basePrice) + parseFloat(commission)).toFixed(2);
+  };
+  
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    
+    if (!stripe || !elements) {
+      return;
+    }
+    
+    setLoading(true);
+    setError(null);
+    
+    try {
+      // Crea intent di pagamento sul server
+      const paymentIntent = await PaymentService.createPaymentIntent({
+        amount: calculateTotal(),
+        description: `${booking.type} - ${booking.details.name || booking.details.title}`,
+        bookingType: booking.type
+      });
+      
+      // Conferma il pagamento con Stripe
+      const result = await stripe.confirmCardPayment(paymentIntent.clientSecret, {
+        payment_method: {
+          card: elements.getElement(CardElement),
+          billing_details: {
+            name: document.getElementById('name').value,
+            email: document.getElementById('email').value,
+          },
+        }
+      });
+      
+      if (result.error) {
+        setError(result.error.message);
+        onComplete({ success: false, message: result.error.message });
+      } else {
+        // Pagamento completato con successo
+        onComplete({ 
+          success: true, 
+          paymentId: result.paymentIntent.id
+        });
+      }
+    } catch (error) {
+      setError('Si è verificato un errore durante l'elaborazione del pagamento');
+      onComplete({ success: false, message: 'Errore del server' });
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  return (
+    <div className="payment-modal-overlay">
+      <div className="payment-modal">
+        <div className="payment-modal-header">
+          <h2>Completa il pagamento</h2>
+          <button className="close-button" onClick={onClose}>&times;</button>
+        </div>
+        
+        <div className="booking-summary">
+          <h3>Riepilogo prenotazione</h3>
+          <p><strong>Tipo:</strong> {booking.type.charAt(0).toUpperCase() + booking.type.slice(1)}</p>
+          <p><strong>Nome:</strong> {booking.details.name || booking.details.title}</p>
+          {booking.details.date && (
+            <p><strong>Data:</strong> {new Date(booking.details.date).toLocaleDateString()}</p>
+          )}
+          {booking.details.location && (
+            <p><strong>Luogo:</strong> {booking.details.location}</p>
+          )}
+          <div className="booking-price">
+            <p><strong>Prezzo:</strong> {booking.details.price}€</p>
+            <p><strong>Commissione servizio:</strong> {commission}€</p>
+            <p className="total-price"><strong>Totale:</strong> {calculateTotal()}€</p>
+          </div>
+        </div>
+        
+        <form onSubmit={handleSubmit} className="payment-form">
+          <div className="form-group">
+            <label htmlFor="name">Nome completo</label>
+            <input type="text" id="name" required />
+          </div>
+          
+          <div className="form-group">
+            <label htmlFor="email">Email</label>
+            <input type="email" id="email" required />
+          </div>
+          
+          <div className="form-group">
+            <label>Carta di credito</label>
+            <div className="card-element-container">
+              <CardElement 
+                options={{
+                  style: {
+                    base: {
+                      fontSize: '16px',
+                      color: '#424770',
+                      '::placeholder': {
+                        color: '#aab7c4',
+                      },
+                    },
+                    invalid: {
+                      color: '#9e2146',
+                    },
+                  },
+                }}
+              />
+            </div>
+          </div>
+          
+          {error && (
+            <div className="error-message">{error}</div>
+          )}
+          
+          <div className="payment-actions">
+            <button type="button" className="cancel-button" onClick={onClose}>Annulla</button>
+            <button 
+              type="submit" 
+              className="pay-button" 
+              disabled={loading || !stripe}
+            >
+              {loading ? 'Elaborazione...' : `Paga ${calculateTotal()}€`}
+            </button>
+          </div>
+          
+          <div className="secure-payment-info">
+            <svg className="lock-icon" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24">
+              <path d="M18 10v-4c0-3.313-2.687-6-6-6s-6 2.687-6 6v4h-3v14h18v-14h-3zm-5 7.723v2.277h-2v-2.277c-.595-.347-1-.984-1-1.723 0-1.104.896-2 2-2s2 .896 2 2c0 .738-.404 1.376-1 1.723zm-5-7.723v-4c0-2.206 1.794-4 4-4 2.205 0 4 1.794 4 4v4h-8z"/>
+            </svg>
+            <span>Pagamento sicuro con crittografia SSL</span>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+export default PaymentModal;
+
+// PaymentService.js - Servizio per gestire i pagamenti
+const PaymentService = {
+  // Crea un intent di pagamento
+  async createPaymentIntent(paymentDetails) {
+    try {
+      const response = await fetch('/api/payment/create-intent', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(paymentDetails),
+      });
+      
+      if (!response.ok) {
+        throw new Error('Errore nella creazione dell\'intent di pagamento');
+      }
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Errore nel servizio di pagamento:', error);
+      throw error;
+    }
+  },
+  
+  // Verifica lo stato di un pagamento
+  async checkPaymentStatus(paymentId) {
+    try {
+      const response = await fetch(`/api/payment/status/${paymentId}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error('Errore nella verifica dello stato del pagamento');
+      }
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Errore nella verifica dello stato del pagamento:', error);
+      throw error;
+    }
+  }
+};
+
+export default PaymentService;
+
+// ApiService.js - Aggiornato con la funzione di ricerca
 const ApiService = {
   // Elabora la richiesta dell'utente tramite GPT
   async processUserRequest(message, userId) {
@@ -161,9 +588,30 @@ const ApiService = {
     }
   },
   
+  // Cerca opzioni in base a criteri
+  async searchOptions(query, type) {
+    try {
+      const response = await fetch(`/api/search?query=${encodeURIComponent(query)}&type=${encodeURIComponent(type)}`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error('Errore nella ricerca');
+      }
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Errore nella ricerca:', error);
+      throw error;
+    }
+  },
+  
   // API per la prenotazione di hotel
   async bookHotel(bookingDetails) {
-    // Integrazione con API di prenotazione hotel
+    // Integrazione con API reali di prenotazione hotel
     try {
       const response = await fetch('/api/book/hotel', {
         method: 'POST',
@@ -182,7 +630,7 @@ const ApiService = {
   
   // API per la prenotazione di ristoranti
   async bookRestaurant(bookingDetails) {
-    // Integrazione con API di prenotazione ristoranti
+    // Integrazione con API reali di prenotazione ristoranti
     try {
       const response = await fetch('/api/book/restaurant', {
         method: 'POST',
@@ -199,379 +647,221 @@ const ApiService = {
     }
   },
   
-  // API per la prenotazione di trasporti (Uber, taxi, ecc.)
-  async bookTransport(bookingDetails) {
-    // Integrazione con API di prenotazione trasporti
+  // Altre API di prenotazione simili...
+};
+
+export default ApiService;
+
+// BookingService.js - Servizio per gestire le prenotazioni
+const BookingService = {
+  // Ottieni lo storico delle prenotazioni di un utente
+  async getUserBookings(userId) {
     try {
-      const response = await fetch('/api/book/transport', {
-        method: 'POST',
+      const response = await fetch(`/api/bookings/${userId}`, {
+        method: 'GET',
         headers: {
           'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(bookingDetails),
+        }
       });
+      
+      if (!response.ok) {
+        throw new Error('Errore nel recupero delle prenotazioni');
+      }
       
       return await response.json();
     } catch (error) {
-      console.error('Errore nella prenotazione del trasporto:', error);
+      console.error('Errore nel recupero delle prenotazioni:', error);
       throw error;
     }
   },
   
-  // API per la prenotazione di voli
-  async bookFlight(bookingDetails) {
-    // Integrazione con API di prenotazione voli
+  // Finalizza la prenotazione dopo il pagamento
+  async finalizeBooking(booking, userId, paymentId) {
     try {
-      const response = await fetch('/api/book/flight', {
+      const response = await fetch('/api/booking/finalize', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify(bookingDetails),
+        body: JSON.stringify({ 
+          booking,
+          userId,
+          paymentId,
+          commission: 0.50
+        }),
       });
+      
+      if (!response.ok) {
+        throw new Error('Errore nella finalizzazione della prenotazione');
+      }
       
       return await response.json();
     } catch (error) {
-      console.error('Errore nella prenotazione del volo:', error);
+      console.error('Errore nella finalizzazione della prenotazione:', error);
       throw error;
     }
   }
 };
 
-export default ApiService;
+export default BookingService;
 
-// Backend - server.js
+// Backend per gestire pagamenti e prenotazioni
+// payment-routes.js
 const express = require('express');
-const cors = require('cors');
-const OpenAI = require('openai');
-const mongoose = require('mongoose');
-const bodyParser = require('body-parser');
-const axios = require('axios');
+const router = express.Router();
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { Commission } = require('../models/commission');
+const { Booking } = require('../models/booking');
+const { User } = require('../models/user');
 
-// Configurazione server Express
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
-
-// Connessione al database MongoDB
-mongoose.connect('mongodb://localhost:27017/concierge-ai', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-});
-
-// Configurazione client OpenAI
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-// Modello per le prenotazioni
-const bookingSchema = new mongoose.Schema({
-  userId: String,
-  type: String, // hotel, restaurant, transport, flight, etc.
-  details: Object,
-  status: String,
-  date: Date,
-  commission: Number,
-  createdAt: { type: Date, default: Date.now }
-});
-
-const Booking = mongoose.model('Booking', bookingSchema);
-
-// API per processare le richieste dell'utente
-app.post('/api/process', async (req, res) => {
+// Crea un intent di pagamento
+router.post('/create-intent', async (req, res) => {
   try {
-    const { message, userId } = req.body;
+    const { amount, description, bookingType } = req.body;
     
-    // Comunica con GPT per analizzare la richiesta dell'utente
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4",
-      messages: [
-        {
-          role: "system",
-          content: `Sei un assistente di prenotazione intelligente. Analizza la richiesta dell'utente per capire:
-          1. Tipo di prenotazione (hotel, ristorante, trasporto, volo, ecc.)
-          2. Dettagli della prenotazione (date, orari, numero persone, ecc.)
-          3. Posizione o destinazione
-          4. Preferenze specifiche
-          
-          Rispondi in formato JSON con i campi:
-          - intentType: il tipo di prenotazione richiesta
-          - details: oggetto con tutti i dettagli rilevanti
-          - missingInfo: campi mancanti che servono per completare la prenotazione
-          - responseText: risposta naturale da mostrare all'utente`
-        },
-        { role: "user", content: message }
-      ]
+    // Converti in centesimi per Stripe
+    const amountInCents = Math.round(parseFloat(amount) * 100);
+    
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amountInCents,
+      currency: 'eur',
+      description,
+      metadata: {
+        bookingType,
+        commission: '0.50'
+      }
     });
     
-    // Estrae il risultato
-    const analysisResult = JSON.parse(completion.choices[0].message.content);
-    
-    // Se abbiamo tutte le informazioni necessarie, procedi con la prenotazione
-    if (analysisResult.missingInfo && analysisResult.missingInfo.length === 0) {
-      // Esegui la prenotazione in base al tipo di richiesta
-      let bookingResult;
-      
-      switch(analysisResult.intentType) {
-        case 'hotel':
-          bookingResult = await bookHotel(analysisResult.details, userId);
-          break;
-        case 'restaurant':
-          bookingResult = await bookRestaurant(analysisResult.details, userId);
-          break;
-        case 'transport':
-          bookingResult = await bookTransport(analysisResult.details, userId);
-          break;
-        case 'flight':
-          bookingResult = await bookFlight(analysisResult.details, userId);
-          break;
-        default:
-          bookingResult = { success: false, message: 'Tipo di prenotazione non supportato' };
-      }
-      
-      // Salva la prenotazione nel database
-      if (bookingResult.success) {
-        const booking = new Booking({
-          userId,
-          type: analysisResult.intentType,
-          details: analysisResult.details,
-          status: 'confirmed',
-          commission: 0.50
-        });
-        
-        await booking.save();
-        
-        res.json({
-          text: analysisResult.responseText,
-          bookingDetails: {
-            type: analysisResult.intentType,
-            details: analysisResult.details,
-            confirmed: true,
-            confirmationCode: bookingResult.confirmationCode
-          }
-        });
-      } else {
-        res.json({
-          text: `${analysisResult.responseText}\n\nPurtroppo non è stato possibile completare la prenotazione: ${bookingResult.message}`,
-          bookingDetails: null
-        });
-      }
-    } else {
-      // Chiedi informazioni mancanti
-      res.json({
-        text: `${analysisResult.responseText}\n\nPer procedere con la prenotazione, ho bisogno di alcune informazioni aggiuntive: ${analysisResult.missingInfo.join(', ')}.`,
-        bookingDetails: null
-      });
-    }
+    res.json({
+      clientSecret: paymentIntent.client_secret,
+      id: paymentIntent.id
+    });
   } catch (error) {
-    console.error('Errore nell\'elaborazione della richiesta:', error);
-    res.status(500).json({ error: 'Errore nell\'elaborazione della richiesta' });
+    console.error('Errore nella creazione dell\'intent di pagamento:', error);
+    res.status(500).json({ error: 'Errore nella creazione dell\'intent di pagamento' });
   }
 });
 
-// Implementazione funzioni di prenotazione
-
-// Prenotazione hotel
-async function bookHotel(details, userId) {
+// Verifica lo stato di un pagamento
+router.get('/status/:paymentId', async (req, res) => {
   try {
-    // Qui inseriresti l'integrazione con API reali di prenotazione hotel
-    // Per questo esempio, simulo una prenotazione riuscita
-    return {
-      success: true,
-      confirmationCode: 'H' + Math.random().toString(36).substring(2, 8).toUpperCase(),
-      message: 'Prenotazione hotel confermata'
-    };
+    const { paymentId } = req.params;
+    
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentId);
+    
+    res.json({
+      status: paymentIntent.status,
+      succeeded: paymentIntent.status === 'succeeded'
+    });
   } catch (error) {
-    console.error('Errore nella prenotazione hotel:', error);
-    return { success: false, message: 'Errore nella prenotazione hotel' };
+    console.error('Errore nella verifica dello stato del pagamento:', error);
+    res.status(500).json({ error: 'Errore nella verifica dello stato del pagamento' });
   }
-}
+});
 
-// Prenotazione ristorante
-async function bookRestaurant(details, userId) {
+// Gestisce il webhook di Stripe
+router.post('/webhook', async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  const endpointSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  
+  let event;
+  
   try {
-    // Qui inseriresti l'integrazione con API reali di prenotazione ristoranti
-    return {
-      success: true,
-      confirmationCode: 'R' + Math.random().toString(36).substring(2, 8).toUpperCase(),
-      message: 'Prenotazione ristorante confermata'
-    };
-  } catch (error) {
-    console.error('Errore nella prenotazione ristorante:', error);
-    return { success: false, message: 'Errore nella prenotazione ristorante' };
+    event = stripe.webhooks.constructEvent(req.body, sig, endpointSecret);
+  } catch (err) {
+    console.error('Errore nella verifica della firma webhook:', err);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
-}
+  
+  // Gestisce eventi di pagamento completato
+  if (event.type === 'payment_intent.succeeded') {
+    const paymentIntent = event.data.object;
+    
+    // Registra la commissione
+    try {
+      const commission = new Commission({
+        paymentId: paymentIntent.id,
+        amount: 0.50,
+        bookingType: paymentIntent.metadata.bookingType,
+        createdAt: new Date()
+      });
+      
+      await commission.save();
+      console.log('Commissione registrata:', commission);
+    } catch (error) {
+      console.error('Errore nella registrazione della commissione:', error);
+    }
+  }
+  
+  res.json({ received: true });
+});
 
-// Prenotazione trasporto
-async function bookTransport(details, userId) {
+module.exports = router;
+
+// booking-routes.js
+const express = require('express');
+const router = express.Router();
+const { Booking } = require('../models/booking');
+const hotelAPI = require('../services/hotel-api');
+const restaurantAPI = require('../services/restaurant-api');
+const flightAPI = require('../services/flight-api');
+const transportAPI = require('../services/transport-api');
+
+// Finalizza la prenotazione dopo il pagamento
+router.post('/finalize', async (req, res) => {
   try {
-    // Qui inseriresti l'integrazione con API come Uber, Lyft, ecc.
-    return {
+    const { booking, userId, paymentId, commission } = req.body;
+    
+    // Invia la prenotazione al servizio esterno appropriato
+    let externalBookingResult;
+    switch (booking.type) {
+      case 'hotel':
+        externalBookingResult = await hotelAPI.makeBooking(booking.details);
+        break;
+      case 'restaurant':
+        externalBookingResult = await restaurantAPI.makeBooking(booking.details);
+        break;
+      case 'flight':
+        externalBookingResult = await flightAPI.makeBooking(booking.details);
+        break;
+      case 'transport':
+        externalBookingResult = await transportAPI.makeBooking(booking.details);
+        break;
+      default:
+        throw new Error('Tipo di prenotazione non supportato');
+    }
+    
+    // Registra la prenotazione nel database
+    const newBooking = new Booking({
+      userId,
+      paymentId,
+      type: booking.type,
+      details: booking.details,
+      externalReference: externalBookingResult.reference,
+      status: 'confirmed',
+      commission,
+      totalPrice: parseFloat(booking.details.price) + parseFloat(commission),
+      createdAt: new Date()
+    });
+    
+    await newBooking.save();
+    
+    res.json({
       success: true,
-      confirmationCode: 'T' + Math.random().toString(36).substring(2, 8).toUpperCase(),
-      message: 'Prenotazione trasporto confermata'
-    };
+      confirmationCode: externalBookingResult.reference,
+      totalPrice: newBooking.totalPrice
+    });
   } catch (error) {
-    console.error('Errore nella prenotazione trasporto:', error);
-    return { success: false, message: 'Errore nella prenotazione trasporto' };
+    console.error('Errore nella finalizzazione della prenotazione:', error);
+    res.status(500).json({ 
+      error: 'Errore nella finalizzazione della prenotazione', 
+      message: error.message 
+    });
   }
-}
+});
 
-// Prenotazione volo
-async function bookFlight(details, userId) {
-  try {
-    // Qui inseriresti l'integrazione con API di prenotazione voli
-    return {
-      success: true,
-      confirmationCode: 'F' + Math.random().toString(36).substring(2, 8).toUpperCase(),
-      message: 'Prenotazione volo confermata'
-    };
-  } catch (error) {
-    console.error('Errore nella prenotazione volo:', error);
-    return { success: false, message: 'Errore nella prenotazione volo' };
-  }
-}
-
-// API per ottenere lo storico delle prenotazioni di un utente
-app.get('/api/bookings/:userId', async (req, res) => {
+// Ottieni lo storico delle prenotazioni di un utente
+router.get('/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-    const bookings = await Booking.find({ userId }).sort({ createdAt: -1 });
-    res.json(bookings);
-  } catch (error) {
-    console.error('Errore nel recupero delle prenotazioni:', error);
-    res.status(500).json({ error: 'Errore nel recupero delle prenotazioni' });
-  }
-});
-
-// Avvio del server
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  console.log(`Server in ascolto sulla porta ${PORT}`);
-});
-
-// Componente React per la visualizzazione della chat
-// ConversationBox.js
-import React, { useState, useRef, useEffect } from 'react';
-import './ConversationBox.css';
-
-function ConversationBox({ conversations, onSendMessage, loading }) {
-  const [message, setMessage] = useState('');
-  const messagesEndRef = useRef(null);
-
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
-
-  useEffect(() => {
-    scrollToBottom();
-  }, [conversations]);
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    if (message.trim() && !loading) {
-      onSendMessage(message);
-      setMessage('');
-    }
-  };
-
-  const formatTime = (timestamp) => {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  };
-
-  const renderMessage = (msg, index) => {
-    if (msg.sender === 'user') {
-      return (
-        <div key={index} className="message user-message">
-          <div className="message-content">
-            <p>{msg.text}</p>
-          </div>
-          <div className="message-timestamp">{formatTime(msg.timestamp)}</div>
-        </div>
-      );
-    } else if (msg.sender === 'ai') {
-      return (
-        <div key={index} className="message ai-message">
-          <div className="message-content">
-            <p>{msg.text}</p>
-          </div>
-          <div className="message-timestamp">{formatTime(msg.timestamp)}</div>
-        </div>
-      );
-    } else if (msg.sender === 'system' && msg.type === 'booking') {
-      // Rendering di una conferma di prenotazione
-      return (
-        <div key={index} className="message system-message booking-confirmation">
-          <div className="booking-details">
-            <h3>Prenotazione Confermata</h3>
-            <p>Tipo: {msg.data.type.charAt(0).toUpperCase() + msg.data.type.slice(1)}</p>
-            {Object.entries(msg.data.details).map(([key, value]) => (
-              <p key={key}>{key}: {typeof value === 'object' ? JSON.stringify(value) : value}</p>
-            ))}
-            <p className="confirmation-code">Codice di conferma: {msg.data.confirmationCode}</p>
-            <p className="commission">Commissione: €0,50</p>
-          </div>
-          <div className="message-timestamp">{formatTime(msg.timestamp)}</div>
-        </div>
-      );
-    } else {
-      return (
-        <div key={index} className="message system-message">
-          <div className="message-content">
-            <p>{msg.text}</p>
-          </div>
-          <div className="message-timestamp">{formatTime(msg.timestamp)}</div>
-        </div>
-      );
-    }
-  };
-
-  return (
-    <div className="conversation-container">
-      <div className="messages-container">
-        {conversations.length === 0 ? (
-          <div className="welcome-message">
-            <h2>Benvenuto/a in Concierge AI!</h2>
-            <p>Chiedi qualsiasi cosa riguardo prenotazioni di:</p>
-            <ul>
-              <li>Hotel e alloggi</li>
-              <li>Ristoranti</li>
-              <li>Voli e viaggi</li>
-              <li>Trasporti (Uber, taxi)</li>
-              <li>Esperienze e attività</li>
-            </ul>
-            <p>Commissione fissa di soli €0,50 per prenotazione completata.</p>
-          </div>
-        ) : (
-          conversations.map((msg, index) => renderMessage(msg, index))
-        )}
-        {loading && (
-          <div className="message ai-message loading">
-            <div className="typing-indicator">
-              <span></span>
-              <span></span>
-              <span></span>
-            </div>
-          </div>
-        )}
-        <div ref={messagesEndRef} />
-      </div>
-      
-      <form className="input-container" onSubmit={handleSubmit}>
-        <input
-          type="text"
-          value={message}
-          onChange={(e) => setMessage(e.target.value)}
-          placeholder="Descrivi cosa vuoi prenotare..."
-          disabled={loading}
-        />
-        <button type="submit" disabled={!message.trim() || loading}>
-          Invia
-        </button>
-      </form>
-    </div>
-  );
-}
-
-export default ConversationBox;
+    const bookings = await Booking.find({ userId }).sort({ createdAt: -1
